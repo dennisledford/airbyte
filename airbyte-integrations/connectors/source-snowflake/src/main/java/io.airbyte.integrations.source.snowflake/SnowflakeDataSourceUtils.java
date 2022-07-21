@@ -11,6 +11,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.airbyte.commons.json.Jsons;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -35,6 +36,9 @@ public class SnowflakeDataSourceUtils {
   public static final String UNRECOGNIZED = "Unrecognized";
 
   private static final Logger LOGGER = LoggerFactory.getLogger(SnowflakeDataSourceUtils.class);
+  public static final String PRIVATE_KEY_FILE_NAME = "rsa_key.p8";
+  public static final String PRIVATE_KEY_FIELD_NAME = "private_key";
+  public static final String PASSPHRASE = "passphrase";
   private static final int PAUSE_BETWEEN_TOKEN_REFRESH_MIN = 7; // snowflake access token's TTL is 10min and can't be modified
   private static final String REFRESH_TOKEN_URL = "https://%s/oauth/token-request";
   private static final HttpClient httpClient = HttpClient.newBuilder()
@@ -53,24 +57,36 @@ public class SnowflakeDataSourceUtils {
   public static HikariDataSource createDataSource(final JsonNode config) {
     HikariDataSource dataSource = new HikariDataSource();
     dataSource.setJdbcUrl(buildJDBCUrl(config));
-
+    final Properties properties = new Properties();
     if (config.has("credentials")) {
       JsonNode credentials = config.get("credentials");
-      final String authType = credentials.has("auth_type") ? credentials.get("auth_type").asText() : UNRECOGNIZED;
-      switch (authType) {
-        case OAUTH_METHOD -> {
-          LOGGER.info("Authorization mode is OAuth");
-          dataSource.setDataSourceProperties(buildAuthProperties(config));
-          // thread to keep the refresh token up to date
-          SnowflakeSource.SCHEDULED_EXECUTOR_SERVICE.scheduleAtFixedRate(
-              getAccessTokenTask(dataSource),
-              PAUSE_BETWEEN_TOKEN_REFRESH_MIN, PAUSE_BETWEEN_TOKEN_REFRESH_MIN, TimeUnit.MINUTES);
+      if (credentials != null && credentials.has(PRIVATE_KEY_FIELD_NAME)) {
+        LOGGER.debug("Login mode with key pair is used");
+        dataSource.setUsername(config.get("username").asText());
+        final String privateKeyValue = credentials.get(PRIVATE_KEY_FIELD_NAME).asText();
+        createPrivateKeyFile(PRIVATE_KEY_FILE_NAME, privateKeyValue);
+        properties.put("private_key_file", PRIVATE_KEY_FILE_NAME);
+        if (credentials.has(PASSPHRASE)) {
+          properties.put("private_key_file_pwd", credentials.get(PASSPHRASE).asText());
         }
-        case USERNAME_PASSWORD_METHOD -> {
-          LOGGER.info("Authorization mode is 'Username and password'");
-          populateUsernamePasswordConfig(dataSource, config.get("credentials"));
+        dataSource.setDataSourceProperties(properties);
+      } else {
+        final String authType = credentials.has("auth_type") ? credentials.get("auth_type").asText() : UNRECOGNIZED;
+        switch (authType) {
+          case OAUTH_METHOD -> {
+            LOGGER.info("Authorization mode is OAuth");
+            dataSource.setDataSourceProperties(buildAuthProperties(config));
+            // thread to keep the refresh token up to date
+            SnowflakeSource.SCHEDULED_EXECUTOR_SERVICE.scheduleAtFixedRate(
+                    getAccessTokenTask(dataSource),
+                    PAUSE_BETWEEN_TOKEN_REFRESH_MIN, PAUSE_BETWEEN_TOKEN_REFRESH_MIN, TimeUnit.MINUTES);
+          }
+          case USERNAME_PASSWORD_METHOD -> {
+            LOGGER.info("Authorization mode is 'Username and password'");
+            populateUsernamePasswordConfig(dataSource, config.get("credentials"));
+          }
+          default -> throw new IllegalArgumentException("Unrecognized auth type: " + authType);
         }
-        default -> throw new IllegalArgumentException("Unrecognized auth type: " + authType);
       }
     } else {
       LOGGER.info("Authorization mode is deprecated 'Username and password'. Please update your source configuration");
@@ -187,6 +203,14 @@ public class SnowflakeDataSourceUtils {
       LOGGER.error("Request access token was failed with error" + e.getMessage());
     }
     return properties;
+  }
+
+  private static void createPrivateKeyFile(final String fileName, final String fileValue) {
+    try (final PrintWriter out = new PrintWriter(fileName, StandardCharsets.UTF_8)) {
+      out.print(fileValue);
+    } catch (IOException e) {
+      throw new RuntimeException("Failed to create file for private key");
+    }
   }
 
   private static void populateUsernamePasswordConfig(HikariConfig hikariConfig, JsonNode config) {
