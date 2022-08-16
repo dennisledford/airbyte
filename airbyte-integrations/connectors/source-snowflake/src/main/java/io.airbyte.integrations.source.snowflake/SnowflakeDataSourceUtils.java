@@ -62,7 +62,7 @@ public class SnowflakeDataSourceUtils {
       JsonNode credentials = config.get("credentials");
       if (credentials != null && credentials.has(PRIVATE_KEY_FIELD_NAME)) {
         LOGGER.debug("Login mode with key pair is used");
-        dataSource.setUsername(config.get("username").asText());
+        dataSource.setUsername(config.get("credentials").get("username").asText());
         final String privateKeyValue = credentials.get(PRIVATE_KEY_FIELD_NAME).asText();
         createPrivateKeyFile(PRIVATE_KEY_FILE_NAME, privateKeyValue);
         properties.put("private_key_file", PRIVATE_KEY_FILE_NAME);
